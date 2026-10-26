@@ -97,6 +97,23 @@
             margin-bottom: 10px;
         }
 
+        .sync-status {
+            min-height: 1.2em;
+            margin-top: 8px;
+            font-size: 0.8rem;
+            color: #666;
+            max-width: 320px;
+        }
+        .retry-sync-button {
+            margin-top: 6px;
+            padding: 6px 12px;
+            border: 1px solid currentColor;
+            border-radius: 6px;
+            background: transparent;
+            color: inherit;
+            cursor: pointer;
+        }
+
         .reset-button {
             background: transparent;
             border: none;
@@ -294,6 +311,7 @@
             body { background: #1a1a1a; color: white; }
             .global-counter { color: #fff; }
             .personal-counter { color: #aaa; }
+            .sync-status { color: #aaa; }
             .leaderboard-subtitle { color: #777; border-bottom-color: #333; }
             .button-3d { 
                 background: #2d2d2d; 
@@ -359,6 +377,8 @@
         <div class="global-counter" id="globalCountDisplay">0</div>
         <div class="personal-counter" id="personalCounter">My Clicks: 0</div>
         <button id="resetLocalBtn" class="reset-button">Reset My Clicks</button>
+        <div id="syncStatus" class="sync-status" role="status" aria-live="polite"></div>
+        <button id="retrySyncBtn" class="retry-sync-button" hidden>Retry syncing</button>
     </div>
     <!-- commenting out spinning horse for uhhhh PROFESSIONALISM
     <div class="running-horse-boundary">
@@ -382,6 +402,7 @@
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app-check.js"></script>
+    <script src="click-sync.js"></script>
 
     <script>
         // --- 1. FIREBASE SETUP ---
@@ -430,6 +451,8 @@
     myName = cleanName;
     nameModal.style.display = 'none';
     updateAuthButtonDisplay();
+    watchPlayer(cleanName);
+    renderLiveCounts();
 }
 
         // Always wire up the modal handlers — modal opens on demand via the auth button
@@ -543,83 +566,108 @@
             source.start(0);
         }
 
-        // --- 6. FIREBASE LISTENERS ---
-        globalRef.on('value', (snapshot) => {
-            const count = snapshot.val() || 0;
-            document.getElementById('globalCountDisplay').innerText = count.toLocaleString();
+        // --- 6. LIVE COUNTS AND CLICK SYNCHRONIZATION ---
+        let globalCount = 0;
+        let leaderboardPlayers = [];
+        let leaderboardLoaded = false;
+        const playerWatches = new Map();
+        const syncStatus = document.getElementById('syncStatus');
+        const retrySyncBtn = document.getElementById('retrySyncBtn');
+        const clickSync = createClickSync({
+            write(name) {
+                // One atomic update for one click; no time-window batching.
+                return database.ref().update({
+                    globalClicks: firebase.database.ServerValue.increment(1),
+                    [`users/${name}/score`]: firebase.database.ServerValue.increment(1),
+                    [`users/${name}/lastClick`]: firebase.database.ServerValue.TIMESTAMP
+                });
+            },
+            onChange: renderLiveCounts
         });
 
-        usersRef.orderByChild('score').limitToLast(5).on('value', (snapshot) => {
+        function watchPlayer(name) {
+            if (!name || playerWatches.has(name)) return;
+            const ref = usersRef.child(name).child('score');
+            const watch = { ref, score: null, listener: null };
+            playerWatches.set(name, watch);
+            watch.listener = snapshot => {
+                watch.score = snapshot.val() || 0;
+                renderLiveCounts();
+            };
+            ref.on('value', watch.listener);
+        }
+
+        function renderLiveCounts() {
+            const state = clickSync.getState();
+            // Firebase snapshots include optimistic in-flight increments.
+            // Add only clicks still waiting in our queue, so none count twice.
+            document.getElementById('globalCountDisplay').innerText =
+                (globalCount + state.queuedCount).toLocaleString();
+
+            const scores = new Map(leaderboardPlayers.map(player => [player.name, player.score]));
+            for (const [name, watch] of playerWatches) {
+                if (name !== myName && !state.pendingNames.has(name)) {
+                    watch.ref.off('value', watch.listener);
+                    playerWatches.delete(name);
+                } else if (watch.score !== null) {
+                    scores.set(name, watch.score);
+                }
+            }
+            for (const [name, count] of state.queuedByName) {
+                scores.set(name, (scores.get(name) || 0) + count);
+            }
+            const players = Array.from(scores, ([name, score]) => ({ name, score }))
+                .filter(player => player.score > 0)
+                .sort((a, b) => b.score - a.score || b.name.localeCompare(a.name))
+                .slice(0, 5);
             const list = document.getElementById('leaderboard-list');
-            list.innerHTML = ""; 
-            
-            const players = [];
-            snapshot.forEach((child) => {
-                players.push({ name: child.key, score: child.val().score });
-            });
-
-            players.reverse().forEach((player) => {
+            list.innerHTML = '';
+            if (!leaderboardLoaded && players.length === 0) {
                 const li = document.createElement('li');
-                li.innerText = `${player.name}: ${player.score.toLocaleString()}`;
+                li.textContent = 'Loading...';
                 list.appendChild(li);
-            });
+            }
+            for (const player of players) {
+                const li = document.createElement('li');
+                li.textContent = `${player.name}: ${player.score.toLocaleString()}`;
+                list.appendChild(li);
+            }
+
+            let status = '';
+            if (state.pendingCount > 0) {
+                if (!state.connected) status = 'Offline — keep this tab open to sync your clicks.';
+                else if (state.paused) status = 'Sync paused — your clicks are waiting. Keep this tab open.';
+                else status = 'Syncing…';
+            }
+            if (syncStatus.textContent !== status) syncStatus.textContent = status;
+            retrySyncBtn.hidden = !state.paused || !state.connected;
+        }
+
+        globalRef.on('value', snapshot => {
+            globalCount = snapshot.val() || 0;
+            renderLiveCounts();
         });
+        usersRef.orderByChild('score').limitToLast(5).on('value', snapshot => {
+            leaderboardPlayers = [];
+            snapshot.forEach(child => {
+                leaderboardPlayers.push({ name: child.key, score: child.val().score });
+            });
+            leaderboardLoaded = true;
+            renderLiveCounts();
+        });
+        database.ref('.info/connected').on('value', snapshot => {
+            clickSync.setConnected(snapshot.val() === true);
+        });
+        retrySyncBtn.addEventListener('click', () => clickSync.retry());
+        window.addEventListener('beforeunload', event => {
+            if (clickSync.getState().pendingCount > 0) {
+                event.preventDefault();
+                event.returnValue = '';
+            }
+        });
+        watchPlayer(myName);
 
         // --- 7. THE CLICK EVENT ---
-        let pendingUserClicks = 0;
-        let lastUserWriteTime = 0;
-        let userFlushTimer = null;
-        let consecutiveFailures = 0;
-        const MIN_CLICK_SPACING_MS = 60; // Slightly above the 50ms Firebase rule
-        const MAX_CONSECUTIVE_FAILURES = 5;
-
-        function flushUserClicks() {
-            if (!myName || pendingUserClicks === 0) return;
-
-            const now = Date.now();
-            const elapsed = now - lastUserWriteTime;
-
-            if (elapsed < MIN_CLICK_SPACING_MS) {
-                if (!userFlushTimer) {
-                    userFlushTimer = setTimeout(() => {
-                        userFlushTimer = null;
-                        flushUserClicks();
-                    }, MIN_CLICK_SPACING_MS - elapsed);
-                }
-                return;
-            }
-
-            pendingUserClicks--;
-            lastUserWriteTime = now;
-
-            usersRef.child(myName).update({
-                score: firebase.database.ServerValue.increment(1),
-                lastClick: firebase.database.ServerValue.TIMESTAMP
-            }, (error) => {
-                if (error) {
-                    consecutiveFailures++;
-                    if (consecutiveFailures <= MAX_CONSECUTIVE_FAILURES) {
-                        // If network jitter caused two packets to hit the server <50ms apart,
-                        // re-queue the click and wait one full spacing interval before retrying.
-                        pendingUserClicks++;
-                        lastUserWriteTime = Date.now();
-                        flushUserClicks();
-                    } else {
-                        // Stop retrying if permanently rejected (e.g., App Check failure)
-                        pendingUserClicks = 0;
-                    }
-                } else {
-                    consecutiveFailures = 0;
-                }
-            });
-
-            if (pendingUserClicks > 0 && !userFlushTimer) {
-                userFlushTimer = setTimeout(() => {
-                    userFlushTimer = null;
-                    flushUserClicks();
-                }, MIN_CLICK_SPACING_MS);
-            }
-        }
 
         button.addEventListener('click', (e) => {
             // Block clicks while trivia modal is open
@@ -636,13 +684,8 @@
 
             // Only sync to Firebase if the user has set a name
             if (myName) {
-                globalRef.set(firebase.database.ServerValue.increment(1));
-
-                if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-                    consecutiveFailures = 0;
-                }
-                pendingUserClicks++;
-                flushUserClicks();
+                watchPlayer(myName);
+                clickSync.enqueue(myName);
             }
         });
 
