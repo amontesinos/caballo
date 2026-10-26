@@ -566,6 +566,51 @@
         });
 
         // --- 7. THE CLICK EVENT ---
+        let pendingUserClicks = 0;
+        let lastUserWriteTime = 0;
+        let userFlushTimer = null;
+        const MIN_CLICK_SPACING_MS = 60; // Slightly above the 50ms Firebase rule
+
+        function flushUserClicks() {
+            if (!myName || pendingUserClicks === 0) return;
+
+            const now = Date.now();
+            const elapsed = now - lastUserWriteTime;
+
+            if (elapsed < MIN_CLICK_SPACING_MS) {
+                if (!userFlushTimer) {
+                    userFlushTimer = setTimeout(() => {
+                        userFlushTimer = null;
+                        flushUserClicks();
+                    }, MIN_CLICK_SPACING_MS - elapsed);
+                }
+                return;
+            }
+
+            pendingUserClicks--;
+            lastUserWriteTime = now;
+
+            usersRef.child(myName).update({
+                score: firebase.database.ServerValue.increment(1),
+                lastClick: firebase.database.ServerValue.TIMESTAMP
+            }, (error) => {
+                if (error) {
+                    // If network jitter caused two packets to hit the server <50ms apart,
+                    // re-queue the click and wait one full spacing interval before retrying.
+                    pendingUserClicks++;
+                    lastUserWriteTime = Date.now();
+                    flushUserClicks();
+                }
+            });
+
+            if (pendingUserClicks > 0 && !userFlushTimer) {
+                userFlushTimer = setTimeout(() => {
+                    userFlushTimer = null;
+                    flushUserClicks();
+                }, MIN_CLICK_SPACING_MS);
+            }
+        }
+
         button.addEventListener('click', (e) => {
             // Block clicks while trivia modal is open
             if (antiBotModal.style.display === 'flex') return;
@@ -581,15 +626,10 @@
 
             // Only sync to Firebase if the user has set a name
             if (myName) {
-                globalRef.transaction(c => (c || 0) + 1);
+                globalRef.set(firebase.database.ServerValue.increment(1));
 
-                usersRef.child(myName).transaction((currentData) => {
-                    const data = currentData || { score: 0, lastClick: 0 };
-                    return {
-                        score: data.score + 1,
-                        lastClick: firebase.database.ServerValue.TIMESTAMP
-                    };
-                });
+                pendingUserClicks++;
+                flushUserClicks();
             }
         });
 
