@@ -98,11 +98,7 @@
         }
 
         .sync-status {
-            min-height: 1.2em;
-            margin-top: 8px;
-            font-size: 0.8rem;
-            color: #666;
-            max-width: 320px;
+            display: none;
         }
         .retry-sync-button {
             margin-top: 6px;
@@ -377,7 +373,7 @@
         <div class="global-counter" id="globalCountDisplay">0</div>
         <div class="personal-counter" id="personalCounter">My Clicks: 0</div>
         <button id="resetLocalBtn" class="reset-button">Reset My Clicks</button>
-        <div id="syncStatus" class="sync-status" role="status" aria-live="polite"></div>
+        <div id="syncStatus" class="sync-status" role="status" aria-live="polite" hidden></div>
         <button id="retrySyncBtn" class="retry-sync-button" hidden>Retry syncing</button>
     </div>
     <!-- commenting out spinning horse for uhhhh PROFESSIONALISM
