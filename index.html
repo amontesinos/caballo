@@ -569,7 +569,9 @@
         let pendingUserClicks = 0;
         let lastUserWriteTime = 0;
         let userFlushTimer = null;
+        let consecutiveFailures = 0;
         const MIN_CLICK_SPACING_MS = 60; // Slightly above the 50ms Firebase rule
+        const MAX_CONSECUTIVE_FAILURES = 5;
 
         function flushUserClicks() {
             if (!myName || pendingUserClicks === 0) return;
@@ -595,11 +597,19 @@
                 lastClick: firebase.database.ServerValue.TIMESTAMP
             }, (error) => {
                 if (error) {
-                    // If network jitter caused two packets to hit the server <50ms apart,
-                    // re-queue the click and wait one full spacing interval before retrying.
-                    pendingUserClicks++;
-                    lastUserWriteTime = Date.now();
-                    flushUserClicks();
+                    consecutiveFailures++;
+                    if (consecutiveFailures <= MAX_CONSECUTIVE_FAILURES) {
+                        // If network jitter caused two packets to hit the server <50ms apart,
+                        // re-queue the click and wait one full spacing interval before retrying.
+                        pendingUserClicks++;
+                        lastUserWriteTime = Date.now();
+                        flushUserClicks();
+                    } else {
+                        // Stop retrying if permanently rejected (e.g., App Check failure)
+                        pendingUserClicks = 0;
+                    }
+                } else {
+                    consecutiveFailures = 0;
                 }
             });
 
@@ -628,6 +638,9 @@
             if (myName) {
                 globalRef.set(firebase.database.ServerValue.increment(1));
 
+                if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                    consecutiveFailures = 0;
+                }
                 pendingUserClicks++;
                 flushUserClicks();
             }
